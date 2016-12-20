@@ -1,0 +1,162 @@
+#!/bin/sh
+
+CURDIR=`cd $(dirname $0) ; pwd`
+SETTINGS_FILE=$CURDIR/../etc/pidio.json
+
+export PATH="$PATH:$CURDIR"
+
+FM_FREQ=`jq ".fm.frequency" $SETTINGS_FILE`
+FM_OUTPUT=`test "$FM_FREQ" = "null" && echo 0 || echo 1`
+FM_PID=0
+
+# Fix settings sometimes missing :(
+cp -v $SETTINGS_FILE.orig $SETTINGS_FILE
+
+#
+# Log to $0.log
+
+#exec 1<&- # close stdout
+#exec 2<&- # close stderr
+#exec 1<>$0.log # log stdout to $0.log
+#exec 2>&1 # redirect stderr to stdout
+
+#echo "------- STARTING PIDIO -------"
+
+#
+# Helpers
+
+_radio_at() {
+    I=$(($1 - 1))
+    jq -r ".radios[$I].$2" $SETTINGS_FILE
+}
+
+_radio_play() {
+    TMPWAV=/tmp/pico.wav
+
+    pico2wave -l fr-FR -w $TMPWAV "`_radio_at $1 name`"
+    if [ $FM_OUTPUT -eq 1 ] ; then
+        URL=`_radio_at $1 url`
+
+        (avconv -i $TMPWAV -f s16le -ar 22.05k -ac 1 - | pifm - $FM_FREQ)
+        (avconv -i $URL -f s16le -ar 22.05k -ac 1 - | pifm - $FM_FREQ) &
+        FM_PID=$!
+    else
+        aplay $TMPWAV
+        mpc play $RADIO_IDX
+    fi
+    rm -f $TMPWAV
+}
+
+_radio_stop() {
+    if [ $FM_OUTPUT -eq 1 ] ; then
+        if [ $FM_PID -gt 0 ] ; then
+            pkill -TERM -P $FM_PID
+            FM_PID=0
+        fi
+        gpio mode 7 'in'
+    else
+        mpc stop
+        mpc play $RADIO_IDX
+    fi
+}
+
+_radio_save() {
+    echo "_radio_save: save $SETTINGS_FILE (current=$1)"
+
+    mv -v $SETTINGS_FILE $SETTINGS_FILE.prev
+    jq ".current=$1" $SETTINGS_FILE.prev > $SETTINGS_FILE
+    rm -v $SETTINGS_FILE.prev
+}
+
+#
+# Configure WIFI
+
+if [ -z "`ip addr show wlan0 | grep LOWER_UP`" ] ; then
+    WIFI_NAME=`jq -r .wifi.name $SETTINGS_FILE`
+    WIFI_PASSWORD=`jq -r .wifi.password $SETTINGS_FILE`
+
+    cat << EOF > /etc/network/interfaces.d/wlan0
+allow-hotplug wlan0
+iface wlan0 inet dhcp
+    wpa-ssid "$WIFI_NAME"
+    wpa-psk "$WIFI_PASSWORD"
+EOF
+    ifdown wlan0
+    ifup wlan0
+fi
+
+#
+# Install missing software
+
+if [ $FM_OUTPUT -eq 1 ] ; then
+    which avconv || apt install -y libavutil54
+else
+    which mpd || apt install -y mpd
+    which mpc || apt install -y mpc
+fi
+
+#
+# Load radios
+
+RADIO_MAX=`jq ".radios | length" $SETTINGS_FILE`
+RADIO_IDX=`jq ".current // 1" $SETTINGS_FILE`
+
+sudo mpc stop
+sudo mpc clear
+for i in `seq 1 $RADIO_MAX` ; do
+    mpc add `_radio_at $i url`
+done
+
+#
+# Configure GPIO
+
+gpio mode 0 'in' # Start/Stop the radio.
+gpio mode 1 'in' # Play next station.
+gpio mode 2 'in' # Audio volume -10.
+gpio mode 3 'in' # Audio volume +10.
+
+#
+# Main loop
+
+RADIO_RUNNING=0
+RADIO_UPDATED=1
+
+echo "main loop: enter main loop"
+echo "main loop: FM_OUTPUT=$FM_OUTPUT FM_FREQ=$FM_FREQ"
+
+while true ; do
+    RUNNING=`gpio read 0`
+    NEXT=`gpio read 1`
+    VOLLESS=`gpio read 2`
+    VOLMORE=`gpio read 3`
+
+    echo "main loop: RUNNING=$RUNNING NEXT=$NEXT VOLLESS=$VOLLESS VOLMORE=$VOLMORE"
+    if [ $RUNNING -eq 0 ] ; then
+        if [ $RADIO_RUNNING -eq 1 ] ; then
+            _radio_stop
+            RADIO_RUNNING=0
+            RADIO_UPDATED=1
+        fi
+    else
+        if [ $NEXT -eq 1 ] ; then
+            RADIO_IDX=$(($RADIO_IDX + 1))
+            if [ $RADIO_IDX -gt $RADIO_MAX ] ; then
+                RADIO_IDX=1
+            fi
+            RADIO_UPDATED=1
+        elif [ $VOLLESS -eq 1 ] ; then
+            mpc volume -10
+        elif [ $VOLMORE -eq 1 ] ; then
+            mpc volume +10
+        fi
+        if [ $RADIO_UPDATED -eq 1 ] ; then
+            _radio_stop
+            _radio_play $RADIO_IDX
+            _radio_save $RADIO_IDX
+            RADIO_UPDATED=0
+        fi
+        RADIO_RUNNING=1
+    fi
+
+    sleep 0.1
+done

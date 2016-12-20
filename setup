@@ -1,0 +1,9 @@
+#!/bin/sh
+
+if [ -z $1 ] ; then
+    echo "Usage: $0 os-root-directory"
+    exit 1
+fi
+
+rm -vrf $1/opt/pidio
+cp -prv ./app $1/opt/pidio

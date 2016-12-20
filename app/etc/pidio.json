@@ -1,0 +1,14 @@
+{
+  "wifi": {
+    "name": "...",
+    "password": "..."
+  },
+  "fm": {
+    "frequency": 104.2
+  },
+  "radios": [
+    {"name": "RCF", "url": "http://rcf.streamakaci.com/rcf.mp3"},
+    {"name": "RCF Anjou", "url": "http://rcf.streamakaci.com/rcf49.mp3"},
+    {"name": "Radio Notre Dame", "url": "http://windu.radionotredame.net/RadioNotreDame-Fm.mp3"}
+  ]
+}
